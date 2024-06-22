@@ -1,0 +1,384 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  html_notebook: default
+  word_document: default
+---
+
+# Chargement des Librairies Nécessaires
+
+```{r}
+#install.packages('readxl')
+library(readxl)
+
+#install.packages('tidyverse')
+library(tidyverse)
+
+#install.packages("fpp2")
+library(fpp2)
+
+#install.packages("forecast")
+library(forecast)
+
+#install.packages("ggplot2")
+library(ggplot2)
+
+install.packages("openxlsx")
+library(openxlsx)
+```
+
+# Importation des Données
+
+```{r}
+data <- read_excel('/Users/annabellenarsama/Desktop/SeriesTemporelles/electrain.xlsx')
+print(data)
+```
+
+Pour des raisons de symétrie, nous enlevons les 92 premières lignes qui correspondent au premier jour du mois, mais auxquelles il manque les 4 premières valeurs.
+
+```{r}
+newdata <- data[-(1:91), ]
+print(newdata)
+```
+
+# Transformation des Données en Série Temporelle
+
+```{r}
+newdata["jour"] <- weekdays(as.POSIXct(newdata$Timestamp, format="%m/%d/%Y %H:%M"))
+newdata["heure"] <- format(strptime(newdata$Timestamp, format="%m/%d/%Y %H:%M"))
+print(newdata)
+
+elec <- ts(newdata$`Power (kW)`, start=c(1,6), end=c(51,96), freq=96)
+print(elec)
+```
+
+# Visualisation de la Série Temporelle
+
+```{r}
+autoplot(elec)
+```
+
+On remarque un pic à 0 dans les données. Ce sont des valeurs à remplacer pour permettre la suite des analyses.
+
+# Gestion des valeurs à 0
+
+On remplace à vue d'oeil les valeurs nulles. En effet, on peut voir que ces valeurs sont sur un pic qui tourne autour de 150. On fixe donc ces valeurs à 150.
+
+```{r}
+newdata$`Power (kW)`[newdata$`Power (kW)` == 0] <- 150
+
+elec <- ts(newdata$`Power (kW)`, start=c(1,1), end=c(51,96), freq=96)
+print(elec)
+
+autoplot(elec) # visualisation des valeurs remplacées
+```
+
+# Décomposition de la Série Temporelle
+
+On décompose la série.
+
+```{r}
+autoplot(decompose(elec, type="additive"))
+```
+
+Il ne semble pas y avoir de tendance. On se concentrera donc sur des modèles saisonniers.
+
+# Division des Données
+
+On divise nos données en ensembles d'apprentissage et de test pour un rapport de 80/20. L'ensemble d'apprentissage commence ainsi le premier jour du jeu de données (2 Janvier 2010) à la première heure, et se termine le quarantième jour (10 Février 2010) à la dernière heure.
+
+```{r}
+train <- window(elec, start=c(1,1), end=c(40,96))
+test <- window(elec, start=c(41,1), end=c(50,96))
+```
+
+On affiche les 2 ensembles simultanément :
+
+```{r}
+plot(train, xlim=c(1,52), ylim=c(100,380))
+lines(test, lty=2)
+```
+
+# Lissage Exponentiel Simple
+
+On lance un Lissage Exponentiel Simple, car la meilleure prédiction a priori est une constante.
+
+Modélisation :
+
+```{r}
+LES = HoltWinters(train, alpha=NULL, beta=FALSE, gamma=FALSE)
+print(LES)
+```
+
+On prédit avec la constante trouvée précédemment. On constate que la moyenne, qui équivaut à la moyenne des valeurs de 'Power' est aux environs de 150. Notre valeur fixée a priori pour remplacer les valeurs nulles n'est pas absurde, bien que l'on pourrait la remplacer par la valeur exacte calculée par ce modèle.
+
+Prédiction :
+
+```{r}
+pred1 <- predict(LES, n.ahead=960) # prédiction sur les 10 jours suivants
+plot(test)
+lines(pred1, col=2) # prédiction à partir du train set
+```
+
+Coefficient de la constante du Lissage Exponentiel Simple :
+
+```{r}
+print(LES$alpha) # 0.9860426
+```
+
+Évaluation - RMSE du Lissage Exponentiel Simple :
+
+```{r}
+print(sqrt(mean((pred1-test)^2))) # 93.28624
+```
+
+# Holt Winters Saisonnier
+
+On lance un Holt Winters saisonnier avec une constante alpha et une saisonnalité gamma.
+
+Modélisation :
+
+```{r}
+HW = HoltWinters(train, alpha=NULL, beta=FALSE, gamma=NULL) # sans tendance bêta
+print(HW)
+```
+
+On voit bien les 96 périodes de la saisonnalité.
+
+Prédiction :
+
+```{r}
+pred2 <- predict(HW, n.ahead=960)
+plot(test)
+lines(pred2, col=3) # prédiction à partir du train set
+```
+
+A priori, ce modèle n'est pas si mauvais.
+
+Coefficients de la constante et de la saisonnalité du Holt Winters :
+
+```{r}
+print(HW$alpha) # 0.7831196
+print(HW$gamma) # 0.8904545
+```
+
+Évaluation - RMSE du Holt Winters saisonnier :
+
+```{r}
+print(sqrt(mean((pred2-test)^2))) # 21.26563
+```
+
+# Auto-ARIMA
+
+Après avoir lancé les modèles a priori, on continue avec un auto-ARIMA pour trouver le meilleur modèle théorique.
+
+Modélisation :
+
+```{r}
+model3 = auto.arima(train)
+summary(model3)
+```
+
+L'auto-ARIMA nous donne un SARIMA d'ordre 1, , et de période 96.
+
+Prédiction :
+
+```{r}
+pred3 = forecast(model3, h=960)
+```
+
+RMSE de l'ARIMA :
+
+```{r}
+print(sqrt(mean((pred3$mean-test)^2))) # 15.71738
+```
+
+Notre modèle généré par l'auto-ARIMA est le meilleur jusqu'ici des 3 créés. Mais nous devons maintenant nous assurer que les résidus de la série sont indépendants du passé.
+
+```{r}
+checkresiduals(model3)
+```
+
+Les résidus ne sont donc pas indépendants. Nous devons par conséquent différencier la série afin d'extraire les résidus et les rendre indépendants.
+
+# Suppression Saisonnalité
+
+Il faudrait supprimer la saisonnalité de la série temporelle afin de pouvoir lancer un SARIMA.Pour cela, il faudrait différencier la série avec un lag spécifique. Il faudrait également calculer les auto-corrélations (ggAcf) et les auto-corrélations partielles (ggPacf) pour trouver l'ordre du SARIMA. Il faudrait également s'assurer de l'indépendance des résidus avec un box-test : les résidus sont-ils du bruit blanc ?
+
+```{r}
+tmp = diff(train, lag=96)
+plot(tmp)
+```
+
+```{r}
+ggAcf(tmp)
+```
+
+```{r}
+ggPacf(tmp)
+```
+
+On constate que les résidus ne sont pas indépendants après une différenciation de la série.
+
+```{r}
+tmp1 = diff(tmp, lag=192)
+plot(tmp1)
+```
+
+```{r}
+ggAcf(tmp1)
+```
+
+```{r}
+ggPacf(tmp1)
+```
+
+Après avoir rendu les résidus de la série indépendants, nous pouvons lancer un SARIMA avec les paramètres trouvés précédemment, ainsi que d'autres modèles.
+
+# Réseaux de Neurones
+
+Modélisation :
+
+```{r}
+model4 = nnetar(train)
+print(model4)
+```
+
+Prédiction :
+
+```{r}
+pred4 = forecast(model4, h=960)
+```
+
+Évaluation :
+
+```{r}
+print(sqrt(mean((pred4$mean-test)^2)))
+```
+
+Les réseaux de neurones ne sont pas très bon, probablement parce que notre série n'est pas stationnaire.
+
+# Comparaison de Modèles
+
+Nous insérons un graphique qui affiche simultanément chaque prédiction.
+
+```{r}
+par(mfrow=c(1,1))
+
+plot(test, xlim=c(41,51), ylim=c(120,700))
+lines(test, lty=2)
+lines(pred1, col=2)
+lines(pred2, col=3)
+lines(pred3$mean, col=4)
+lines(pred4$mean, col=5)
+legend('topleft', 
+       col=1:5, 
+       lty=1, 
+       legend=c('Vraies Données', 
+                'Prédictions avec LES', 
+                'Prédictions avec HW', 
+                'ARIMA', 
+                'Réseaux de Neurones'))
+```
+
+# Prédiction avec le Meilleur Modèle
+
+```{r}
+SAR = Arima(elec, order=c(1,0,0), seasonal=c(0,1,0))
+summary(SAR)
+
+pred = forecast(SAR, h=96)
+
+autoplot(elec)+autolayer(pred)
+
+#predictions <- as.numeric(pred$mean)
+#pred_df <- data.frame(Prediction = predictions)
+```
+
+# Séries Multivariées
+
+Ici, nous tentons de prédire la consommation d'électricité avec la température comme covariable.
+
+## Division des Données
+
+```{r}
+power <- ts(newdata$`Power (kW)`, start=c(1,6), end=c(51,96), freq=96)
+temperature <- ts(newdata$`Temp (C°)`, start=c(1,6), end=c(51,96), freq=96)
+
+power_train <- window(power, start=c(1,1), end=c(40,96))
+power_test <- window(power, start=c(41,1), end=c(50,96))
+
+temperature_train <- window(temperature, start=c(1,1), end=c(40,96))
+temperature_test <- window(temperature, start=c(41,1), end=c(50,96))
+```
+
+## Régression linéaire sans tendance et saisonnalité
+
+Nous lançons des modèles a priori pour voir le lien entre les 2 variables.
+
+```{r}
+fit1 = tslm(power_train ~ temperature_train)
+summary(fit1)
+```
+
+## Régression linéaire avec tendance et saisonnalité
+
+```{r}
+fit2 = tslm(power_train ~ temperature_train+season+trend)
+summary(fit2)
+```
+
+Validation croisée des 2 régressions linéaires précédentes :
+
+```{r}
+CV(fit1)
+CV(fit2) # BIC meilleur
+```
+
+La deuxième a le meilleur BIC. On préfèrera donc le modèle de régression linéaire avec tendance et saisonnalité.
+
+Check des résidus :
+
+```{r}
+checkresiduals(fit2, test=FALSE, plot=TRUE)
+```
+
+```{r}
+checkresiduals(fit2, test='LB', plot=FALSE)
+```
+
+```{r}
+ggAcf(fit2$residuals)
+```
+
+```{r}
+ggPacf(fit2$residuals)
+```
+
+Les résidus ne sont pas indépendants. Il faudrait donc les extraire et obtenir une série stationnaire à l'aide d'une méthode de différenciation et de vérification des résidus.
+
+## Modèle de régression dynamique quand résidus indépendants
+
+```{r}
+fit3 = Arima(power_train, xreg=temperature_train, order=c(1, 0, 0), seasonal=c(0, 1, 0))
+summary(fit3)
+```
+
+Check des résidus :
+
+```{r}
+checkresiduals(fit3, test=FALSE)
+checkresiduals(fit3, plot=FALSE)
+```
+
+## Réseaux de neurones
+
+```{r}
+fit4 = nnetar(power_train, xreg=temperature_train)
+print(fit4)
+
+autoplot(forecast(train))
+```
